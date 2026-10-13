@@ -10,13 +10,13 @@
 
 
              ;;-----------------------------------------------------
-             ;; google storage API
+             ;; Google Dataflow API
              ;;-----------------------------------------------------
              com.google.cloud/google-cloud-dataflow {:mvn/version "0.101.0"}}
  :aliases   {:dev  {:extra-deps {vvvvalvalval/scope-capture {:mvn/version "0.3.2"}}}
              :test {:extra-paths ["test"]
+                    :main-opts   ["-m" "kaocha.runner"]
                     :extra-deps  {org.clojure/test.check {:mvn/version "1.1.1"}
                                   metosin/testit         {:mvn/version "0.4.0"}
                                   lambdaisland/kaocha    {:mvn/version "0.0-418"}
                                   ring/ring-mock         {:mvn/version "0.4.0"}}}}}
-
