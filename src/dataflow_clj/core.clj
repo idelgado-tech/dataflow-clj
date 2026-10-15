@@ -5,11 +5,19 @@
   (:import
    (java.time LocalDateTime
               Duration)
-   (com.google.dataflow.v1beta3 Job
+   (com.google.dataflow.v1beta3 Job JobMessage
                                 JobsV1Beta3Client
+                                StageSummary WorkerDetails WorkItemDetails
+                                ProgressTimeseries ProgressTimeseries$Point
+                                MetricUpdate MetricStructuredName StragglerSummary Straggler
+                                StragglerInfo StragglerInfo$StragglerDebuggingInfo
+                                StreamingStragglerInfo HotKeyDebuggingInfo$HotKeyInfo
                                 GetJobRequest
                                 JobState JobView ListJobsRequest$Filter JobMessageImportance
                                 GetTemplateRequest$TemplateView
+                                GetTemplateResponse LaunchTemplateResponse LaunchFlexTemplateResponse
+                                TemplateMetadata ParameterMetadata ParameterMetadataEnumOption
+                                RuntimeMetadata SDKInfo
                                 LaunchTemplateParameters LaunchFlexTemplateParameter
                                 RuntimeEnvironment DynamicTemplateLaunchParams
                                 ListJobsRequest
@@ -39,7 +47,9 @@
             (.toMinutesPart d),
             (.toSecondsPart d))))
 
-(defn- enum-name [value]
+(defn- ->java-enum-name
+  "transform a kebab case string or keyword into a java enum"
+  [value]
   (-> (if (keyword? value) (name value) (str value))
       str/upper-case
       (str/replace "-" "_")))
@@ -115,12 +125,12 @@
     (throw (ex-info "Unknown job filter" {:filter-state filter-state})))
   (.build (cond-> (-> (ListJobsRequest/newBuilder)
                       (.setProjectId project-id))
-            (some? filter) (.setFilter (ListJobsRequest$Filter/valueOf (enum-name filter)))
+            (some? filter) (.setFilter (ListJobsRequest$Filter/valueOf (->java-enum-name filter)))
             (some? location) (.setLocation location)
             (some? name) (.setName name)
             (some? page-size) (.setPageSize page-size)
             (some? page-token) (.setPageToken page-token)
-            (some? view) (.setView (JobView/valueOf (enum-name view)))
+            (some? view) (.setView (JobView/valueOf (->java-enum-name view)))
             filter-state (.setFilter (ListJobsRequest$Filter/forNumber (job-state->value filter-state))))))
 
 (defn ->GetJobRequest [project-id job-id {:keys [location view]}]
@@ -128,14 +138,14 @@
                       (.setProjectId project-id)
                       (.setJobId job-id))
             (some? location) (.setLocation location)
-            (some? view) (.setView (JobView/valueOf (enum-name view))))))
+            (some? view) (.setView (JobView/valueOf (->java-enum-name view))))))
 
 (defn ->CreateJobRequest [project-id ^Job job {:keys [location view replace-job-id]}]
   (.build (cond-> (-> (CreateJobRequest/newBuilder)
                       (.setProjectId project-id)
                       (.setJob job))
             (some? location) (.setLocation location)
-            (some? view) (.setView (JobView/valueOf (enum-name view)))
+            (some? view) (.setView (JobView/valueOf (->java-enum-name view)))
             (some? replace-job-id) (.setReplaceJobId replace-job-id))))
 
 (defn ->UpdateJobRequest [project-id job-id ^Job job {:keys [location ^com.google.protobuf.FieldMask update-mask]}]
@@ -164,7 +174,7 @@
                       (.setProjectId project-id)
                       (.setJobId job-id))
             (some? location) (.setLocation location)
-            (some? minimum-importance) (.setMinimumImportance (JobMessageImportance/valueOf (enum-name minimum-importance)))
+            (some? minimum-importance) (.setMinimumImportance (JobMessageImportance/valueOf (->java-enum-name minimum-importance)))
             (some? page-size) (.setPageSize page-size)
             (some? page-token) (.setPageToken page-token)
             (some? start-time) (.setStartTime start-time)
@@ -219,7 +229,7 @@
                       (.setProjectId project-id)
                       (.setGcsPath gcs-path))
             (some? location) (.setLocation location)
-            (some? view) (.setView (GetTemplateRequest$TemplateView/valueOf (enum-name view))))))
+            (some? view) (.setView (GetTemplateRequest$TemplateView/valueOf (->java-enum-name view))))))
 
 (defn ->LaunchFlexTemplateRequest [project-id ^LaunchFlexTemplateParameter launch-parameter {:keys [location validate-only]}]
   (.build (cond-> (-> (LaunchFlexTemplateRequest/newBuilder)
@@ -316,6 +326,191 @@
      :time-to-status (when (and start-time current-status-time)
                        (duration-between-times-human start-time current-status-time))}))
 
+(defn- ParameterMetadataEnumOption->clj [^ParameterMetadataEnumOption option]
+  {:value (.getValue option)
+   :label (.getLabel option)
+   :description (.getDescription option)})
+
+(defn- ParameterMetadata->clj [^ParameterMetadata parameter]
+  {:name (.getName parameter)
+   :label (.getLabel parameter)
+   :help-text (.getHelpText parameter)
+   :is-optional (.getIsOptional parameter)
+   :regexes (vec (.getRegexesList parameter))
+   :param-type (str (.getParamType parameter))
+   :custom-metadata (into {} (.getCustomMetadataMap parameter))
+   :group-name (.getGroupName parameter)
+   :parent-name (.getParentName parameter)
+   :parent-trigger-values (vec (.getParentTriggerValuesList parameter))
+   :enum-options (mapv ParameterMetadataEnumOption->clj (.getEnumOptionsList parameter))
+   :default-value (.getDefaultValue parameter)
+   :hidden-ui (.getHiddenUi parameter)})
+
+(defn- TemplateMetadata->clj [^TemplateMetadata metadata]
+  {:name (.getName metadata)
+   :description (.getDescription metadata)
+   :parameters (mapv ParameterMetadata->clj (.getParametersList metadata))
+   :streaming (.getStreaming metadata)
+   :supports-at-least-once (.getSupportsAtLeastOnce metadata)
+   :supports-exactly-once (.getSupportsExactlyOnce metadata)
+   :default-streaming-mode (.getDefaultStreamingMode metadata)})
+
+(defn- SDKInfo->clj [^SDKInfo sdk]
+  {:language (str (.getLanguage sdk))
+   :version (.getVersion sdk)})
+
+(defn- RuntimeMetadata->clj [^RuntimeMetadata metadata]
+  {:sdk-info (when (.hasSdkInfo metadata)
+               (SDKInfo->clj (.getSdkInfo metadata)))
+   :parameters (mapv ParameterMetadata->clj (.getParametersList metadata))})
+
+(defn- Status->clj [^com.google.rpc.Status status]
+  {:code (.getCode status)
+   :message (.getMessage status)
+   :details (mapv (fn [^com.google.protobuf.Any detail]
+                    {:type-url (.getTypeUrl detail)
+                     :value (.encodeToString (java.util.Base64/getEncoder)
+                                             (.toByteArray (.getValue detail)))})
+                  (.getDetailsList status))})
+
+(defn- GetTemplateResponse->clj [^GetTemplateResponse response]
+  {:status (when (.hasStatus response)
+             (Status->clj (.getStatus response)))
+   :metadata (when (.hasMetadata response)
+               (TemplateMetadata->clj (.getMetadata response)))
+   :template-type (str (.getTemplateType response))
+   :runtime-metadata (when (.hasRuntimeMetadata response)
+                       (RuntimeMetadata->clj (.getRuntimeMetadata response)))})
+
+(defn- LaunchTemplateResponse->clj [^LaunchTemplateResponse response]
+  {:job (when (.hasJob response)
+          (Job->clj (.getJob response)))})
+
+(defn- LaunchFlexTemplateResponse->clj [^LaunchFlexTemplateResponse response]
+  {:job (when (.hasJob response)
+          (Job->clj (.getJob response)))})
+
+(defn- JobMessage->clj [^JobMessage message]
+  {:id (.getId message)
+   :time (when (.hasTime message)
+           (timestamp->LocalDateTime (.getTime message)))
+   :message-text (.getMessageText message)
+   :message-importance (str (.getMessageImportance message))})
+
+(defn- duration->Duration [^com.google.protobuf.Duration duration]
+  (Duration/ofSeconds (.getSeconds duration) (.getNanos duration)))
+
+(defn- Value->clj [^com.google.protobuf.Value value]
+  (case (str (.getKindCase value))
+    "NUMBER_VALUE" (.getNumberValue value)
+    "STRING_VALUE" (.getStringValue value)
+    "BOOL_VALUE" (.getBoolValue value)
+    "STRUCT_VALUE" (into {} (map (fn [[k v]] [k (Value->clj v)]))
+                         (.getFieldsMap (.getStructValue value)))
+    "LIST_VALUE" (mapv Value->clj (.getValuesList (.getListValue value)))
+    nil))
+
+(defn- MetricStructuredName->clj [^MetricStructuredName metric-name]
+  {:origin (.getOrigin metric-name)
+   :name (.getName metric-name)
+   :context (into {} (.getContextMap metric-name))})
+
+(defn- MetricUpdate->clj [^MetricUpdate metric]
+  {:name (when (.hasName metric)
+           (MetricStructuredName->clj (.getName metric)))
+   :kind (.getKind metric)
+   :cumulative (.getCumulative metric)
+   :scalar (when (.hasScalar metric) (Value->clj (.getScalar metric)))
+   :mean-sum (when (.hasMeanSum metric) (Value->clj (.getMeanSum metric)))
+   :mean-count (when (.hasMeanCount metric) (Value->clj (.getMeanCount metric)))
+   :set (when (.hasSet metric) (Value->clj (.getSet metric)))
+   :trie (when (.hasTrie metric) (Value->clj (.getTrie metric)))
+   :bounded-trie (when (.hasBoundedTrie metric) (Value->clj (.getBoundedTrie metric)))
+   :distribution (when (.hasDistribution metric) (Value->clj (.getDistribution metric)))
+   :gauge (when (.hasGauge metric) (Value->clj (.getGauge metric)))
+   :internal (when (.hasInternal metric) (Value->clj (.getInternal metric)))
+   :update-time (when (.hasUpdateTime metric)
+                  (timestamp->LocalDateTime (.getUpdateTime metric)))})
+
+(defn- ProgressPoint->clj [^ProgressTimeseries$Point point]
+  {:time (when (.hasTime point)
+           (timestamp->LocalDateTime (.getTime point)))
+   :value (.getValue point)})
+
+(defn- ProgressTimeseries->clj [^ProgressTimeseries progress]
+  {:current-progress (.getCurrentProgress progress)
+   :data-points (mapv ProgressPoint->clj (.getDataPointsList progress))})
+
+(defn- HotKeyInfo->clj [^HotKeyDebuggingInfo$HotKeyInfo hot-key]
+  {:hot-key-age (when (.hasHotKeyAge hot-key)
+                  (duration->Duration (.getHotKeyAge hot-key)))
+   :key (.getKey hot-key)
+   :key-truncated (.getKeyTruncated hot-key)})
+
+(defn- StragglerDebuggingInfo->clj [^StragglerInfo$StragglerDebuggingInfo info]
+  {:hot-key (when (.hasHotKey info)
+              {:detected-hot-keys (into {} (map (fn [[k v]] [k (HotKeyInfo->clj v)]))
+                                        (.getDetectedHotKeysMap (.getHotKey info)))})})
+
+(defn- StragglerInfo->clj [^StragglerInfo info]
+  {:start-time (when (.hasStartTime info)
+                 (timestamp->LocalDateTime (.getStartTime info)))
+   :causes (into {} (map (fn [[k v]] [k (StragglerDebuggingInfo->clj v)]))
+                 (.getCausesMap info))})
+
+(defn- StreamingStragglerInfo->clj [^StreamingStragglerInfo info]
+  {:start-time (when (.hasStartTime info)
+                 (timestamp->LocalDateTime (.getStartTime info)))
+   :end-time (when (.hasEndTime info)
+               (timestamp->LocalDateTime (.getEndTime info)))
+   :worker-name (.getWorkerName info)
+   :data-watermark-lag (when (.hasDataWatermarkLag info)
+                         (duration->Duration (.getDataWatermarkLag info)))
+   :system-watermark-lag (when (.hasSystemWatermarkLag info)
+                           (duration->Duration (.getSystemWatermarkLag info)))})
+
+(defn- Straggler->clj [^Straggler straggler]
+  {:batch-straggler (when (.hasBatchStraggler straggler)
+                      (StragglerInfo->clj (.getBatchStraggler straggler)))
+   :streaming-straggler (when (.hasStreamingStraggler straggler)
+                          (StreamingStragglerInfo->clj (.getStreamingStraggler straggler)))})
+
+(defn- StragglerSummary->clj [^StragglerSummary summary]
+  {:total-straggler-count (.getTotalStragglerCount summary)
+   :straggler-cause-count (into {} (.getStragglerCauseCountMap summary))
+   :recent-stragglers (mapv Straggler->clj (.getRecentStragglersList summary))})
+
+(defn- StageSummary->clj [^StageSummary stage]
+  {:stage-id (.getStageId stage)
+   :state (str (.getState stage))
+   :start-time (when (.hasStartTime stage)
+                 (timestamp->LocalDateTime (.getStartTime stage)))
+   :end-time (when (.hasEndTime stage)
+               (timestamp->LocalDateTime (.getEndTime stage)))
+   :progress (when (.hasProgress stage)
+               (ProgressTimeseries->clj (.getProgress stage)))
+   :metrics (mapv MetricUpdate->clj (.getMetricsList stage))
+   :straggler-summary (when (.hasStragglerSummary stage)
+                        (StragglerSummary->clj (.getStragglerSummary stage)))})
+
+(defn- WorkItemDetails->clj [^WorkItemDetails work-item]
+  {:task-id (.getTaskId work-item)
+   :attempt-id (.getAttemptId work-item)
+   :state (str (.getState work-item))
+   :start-time (when (.hasStartTime work-item)
+                 (timestamp->LocalDateTime (.getStartTime work-item)))
+   :end-time (when (.hasEndTime work-item)
+               (timestamp->LocalDateTime (.getEndTime work-item)))
+   :progress (when (.hasProgress work-item)
+               (ProgressTimeseries->clj (.getProgress work-item)))
+   :metrics (mapv MetricUpdate->clj (.getMetricsList work-item))
+   :straggler-info (when (.hasStragglerInfo work-item)
+                     (StragglerInfo->clj (.getStragglerInfo work-item)))})
+
+(defn- WorkerDetails->clj [^WorkerDetails worker]
+  {:worker-name (.getWorkerName worker)
+   :work-items (mapv WorkItemDetails->clj (.getWorkItemsList worker))})
+
 ;;-----------------------------------
 ;;          API
 ;;-----------------------------------
@@ -382,7 +577,19 @@
                          (let [response (.updateJob client request)]
                            (job-response->clj response options)))))))
 
-(defn check-active-jobs
+(defn cancel-job
+  "Request cancellation of a job."
+  ([project-id job-id] (cancel-job project-id job-id {}))
+  ([project-id job-id options]
+   (update-job project-id job-id (.build (.setRequestedState (Job/newBuilder) JobState/JOB_STATE_CANCELLED)) options)))
+
+(defn drain-job
+  "Request draining of a streaming job."
+  ([project-id job-id] (drain-job project-id job-id {}))
+  ([project-id job-id options]
+   (update-job project-id job-id (.build (.setRequestedState (Job/newBuilder) JobState/JOB_STATE_DRAINING)) options)))
+
+(defn ^:deprecated check-active-jobs
   "WARNING Exist in the SDK but Not supported by router Yet.
    Call Dataflow checkActiveJobs. Options accept request fields, :client."
   ([project-id]
@@ -394,12 +601,42 @@
                          (let [response (.checkActiveJobs client request)]
                            response))))))
 
-(defn check-active-jobs-v2 
+(defn list-active-jobs
+  "The current CheckActiveJobsRequest is not implemented yet, this one uses aggregated-list-job with a filter instead.
+   List current active jobs.
+   Options accept request fields, :client."
   [project-id]
   (seq
    (aggregated-list-jobs    project-id
                             {:filter-state :active})))
 
+(defn create-job-from-template
+  "Call Dataflow createJobFromTemplate. Options accept request fields, :client."
+  ([project-id gcs-path job-name]
+   (create-job-from-template project-id gcs-path job-name {}))
+  ([project-id gcs-path job-name options]
+   (let [request (->CreateJobFromTemplateRequest project-id gcs-path job-name (request-options options {:location "europe-west1"}))]
+     (call-with-client :templates options
+                       (fn [^TemplatesServiceClient client]
+                         (let [response (.createJobFromTemplate client request)]
+                           (job-response->clj response options)))))))
+
+(defn list-job-messages
+  "Return job messages as maps with :id, :time, :message-text and :message-importance.
+   Options accept request fields, :client and :raw? to return Java messages."
+  ([project-id job-id]
+   (list-job-messages project-id job-id {}))
+  ([project-id job-id options]
+   (let [request (->ListJobMessagesRequest project-id job-id (request-options options {:location "europe-west1"}))]
+     (call-with-client :messages options
+                       (fn [^MessagesV1Beta3Client client]
+                         (let [response (.listJobMessages client request)]
+                           (mapv #(if (:raw? options) % (JobMessage->clj %))
+                                 (.iterateAll response))))))))
+
+
+
+;;TODO Test and fix
 
 (defn snapshot-job
   "Call Dataflow snapshotJob. Options accept request fields, :client."
@@ -412,16 +649,6 @@
                          (let [response (.snapshotJob client request)]
                            response))))))
 
-(defn list-job-messages
-  "Call Dataflow listJobMessages. Options accept request fields, :client."
-  ([project-id job-id]
-   (list-job-messages project-id job-id {}))
-  ([project-id job-id options]
-   (let [request (->ListJobMessagesRequest project-id job-id (request-options options {:location "europe-west1"}))]
-     (call-with-client :messages options
-                       (fn [^MessagesV1Beta3Client client]
-                         (let [response (.listJobMessages client request)]
-                           (.iterateAll response)))))))
 
 (defn get-job-metrics
   "Call Dataflow getJobMetrics. Options accept request fields, :client."
@@ -435,7 +662,8 @@
                            response))))))
 
 (defn get-job-execution-details
-  "Call Dataflow getJobExecutionDetails. Options accept request fields, :client."
+  "Call Dataflow getJobExecutionDetails. Return stage details as maps.
+   Options accept request fields, :client and :raw? to return Java objects."
   ([project-id job-id]
    (get-job-execution-details project-id job-id {}))
   ([project-id job-id options]
@@ -443,10 +671,12 @@
      (call-with-client :metrics options
                        (fn [^MetricsV1Beta3Client client]
                          (let [response (.getJobExecutionDetails client request)]
-                           (mapv #(prn %) (.iterateAll response))))))))
+                           (mapv #(if (:raw? options) % (StageSummary->clj %))
+                                 (.iterateAll response))))))))
 
 (defn get-stage-execution-details
-  "Call Dataflow getStageExecutionDetails. Options accept request fields, :client."
+  "Call Dataflow getStageExecutionDetails. Return worker details as maps.
+   Options accept request fields, :client and :raw? to return Java objects."
   ([project-id job-id stage-id]
    (get-stage-execution-details project-id job-id stage-id {}))
   ([project-id job-id stage-id options]
@@ -454,21 +684,14 @@
      (call-with-client :metrics options
                        (fn [^MetricsV1Beta3Client client]
                          (let [response (.getStageExecutionDetails client request)]
-                           (.iterateAll response)))))))
+                           (mapv #(if (:raw? options) % (WorkerDetails->clj %))
+                                 (.iterateAll response))))))))
 
-(defn create-job-from-template
-  "Call Dataflow createJobFromTemplate. Options accept request fields, :client."
-  ([project-id gcs-path job-name]
-   (create-job-from-template project-id gcs-path job-name {}))
-  ([project-id gcs-path job-name options]
-   (let [request (->CreateJobFromTemplateRequest project-id gcs-path job-name (request-options options {:location "europe-west1"}))]
-     (call-with-client :templates options
-                       (fn [^TemplatesServiceClient client]
-                         (let [response (.createJobFromTemplate client request)]
-                           (job-response->clj response options)))))))
+
 
 (defn launch-template
-  "Call Dataflow launchTemplate. Options accept request fields, :client."
+  "Call Dataflow launchTemplate. Return a Clojure map.
+   Options accept request fields, :client and :raw? to return the Java response."
   ([project-id gcs-path launch-parameters]
    (launch-template project-id gcs-path launch-parameters {}))
   ([project-id gcs-path launch-parameters options]
@@ -476,10 +699,11 @@
      (call-with-client :templates options
                        (fn [^TemplatesServiceClient client]
                          (let [response (.launchTemplate client request)]
-                           response))))))
+                           (if (:raw? options) response (LaunchTemplateResponse->clj response))))))))
 
 (defn get-template
-  "Call Dataflow getTemplate. Options accept request fields, :client."
+  "Call Dataflow getTemplate. Return template metadata as a Clojure map. Status detail :value fields are Base64 strings.
+   Options accept request fields, :client and :raw? to return the Java response."
   ([project-id gcs-path]
    (get-template project-id gcs-path {}))
   ([project-id gcs-path options]
@@ -487,10 +711,11 @@
      (call-with-client :templates options
                        (fn [^TemplatesServiceClient client]
                          (let [response (.getTemplate client request)]
-                           response))))))
+                           (if (:raw? options) response (GetTemplateResponse->clj response))))))))
 
 (defn launch-flex-template
-  "Call Dataflow launchFlexTemplate. Options accept request fields, :client."
+  "Call Dataflow launchFlexTemplate. Return a Clojure map.
+   Options accept request fields, :client and :raw? to return the Java response."
   ([project-id launch-parameter]
    (launch-flex-template project-id launch-parameter {}))
   ([project-id launch-parameter options]
@@ -498,7 +723,7 @@
      (call-with-client :flex-templates options
                        (fn [^FlexTemplatesServiceClient client]
                          (let [response (.launchFlexTemplate client request)]
-                           response))))))
+                           (if (:raw? options) response (LaunchFlexTemplateResponse->clj response))))))))
 
 (defn get-snapshot
   "Call Dataflow getSnapshot. Options accept request fields, :client."
@@ -532,26 +757,3 @@
                        (fn [^SnapshotsV1Beta3Client client]
                          (let [response (.listSnapshots client request)]
                            (.getSnapshotsList response)))))))
-
-(defn cancel-job
-  "Request cancellation of a job."
-  ([project-id job-id] (cancel-job project-id job-id {}))
-  ([project-id job-id options]
-   (update-job project-id job-id (.build (.setRequestedState (Job/newBuilder) JobState/JOB_STATE_CANCELLED)) options)))
-
-(defn drain-job
-  "Request draining of a streaming job."
-  ([project-id job-id] (drain-job project-id job-id {}))
-  ([project-id job-id options]
-   (update-job project-id job-id (.build (.setRequestedState (Job/newBuilder) JobState/JOB_STATE_DRAINING)) options)))
-
-
-(comment 
-  (list-jobs "electre4000")
-  (check-active-jobs "electre4000")
-  
-  (list-job-messages "electre4000" "2026-10-13_03_54_50-10868484121205150971")
-  
-  (def values (get-job-execution-details "electre4000" "2026-10-13_03_54_50-10868484121205150971"))
- 
-  )
